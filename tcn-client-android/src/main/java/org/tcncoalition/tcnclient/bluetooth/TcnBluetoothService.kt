@@ -9,7 +9,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.lifecycle.LifecycleService
 
-class TcnBluetoothService : LifecycleService() {
+open class TcnBluetoothService : LifecycleService() {
 
     private var tcnBluetoothManager: TcnBluetoothManager? = null
     private var bluetoothStateListener: BluetoothStateListener? = null
