@@ -7,7 +7,15 @@ import android.bluetooth.BluetoothGattServer
 import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
-import android.bluetooth.le.*
+import android.bluetooth.le.AdvertiseCallback
+import android.bluetooth.le.AdvertiseData
+import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.BluetoothLeAdvertiser
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
 import android.os.Handler
@@ -18,6 +26,8 @@ import org.tcncoalition.tcnclient.TcnConstants
 import java.util.Timer
 import java.util.TimerTask
 import java.util.UUID
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class TcnBluetoothManager(
@@ -27,24 +37,19 @@ class TcnBluetoothManager(
     private val tcnCallback: TcnBluetoothServiceCallback
 ) {
 
-    var bluetoothGattServer: BluetoothGattServer? = null
+    private var bluetoothGattServer: BluetoothGattServer? = null
 
     private var isStarted: Boolean = false
-
     private var generatedTcn = ByteArray(0)
-
     private var tcnAdvertisingQueue = ArrayList<ByteArray>()
-
-    private var inRangeBleAddressToTcnMap: MutableMap<String, ByteArray> = mutableMapOf()
-
-    private var estimatedDistanceToRemoteDeviceAddressMap: MutableMap<String, Double> =
-        mutableMapOf()
+    private var inRangeBleAddressToTcnMap = mutableMapOf<String, ByteArray>()
+    private var estimatedDistanceToRemoteDeviceAddressMap = mutableMapOf<String, Double>()
 
     private var handler = Handler()
-
     private var generateOwnTcnTimer: Timer? = null
-
     private var advertiseNextTcnTimer: Timer? = null
+
+    private val executor: ExecutorService = Executors.newFixedThreadPool(2)
 
     fun start() {
         if (isStarted) return
@@ -56,8 +61,9 @@ class TcnBluetoothManager(
             (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager),
             TcnConstants.UUID_SERVICE
         )
-
-        changeOwnTcn() // This starts advertising also
+        executor.execute {
+            changeOwnTcn() // This starts advertising also
+        }
         runChangeOwnTcnTimer()
         runAdvertiseNextTcnTimer()
     }
@@ -150,10 +156,12 @@ class TcnBluetoothManager(
         if (!isStarted) return
         // Use try catch to handle DeadObject exception
         try {
-            // Scan filters are required for continuous background scanning.
-//            val scanFilters = arrayOf(TcnConstants.UUID_SERVICE).map {
-//                ScanFilter.Builder().setServiceUuid(ParcelUuid(it)).build()
-//            }
+            // The use of scan filters aren't required while the app is in the foreground.
+            // This changes when the app is in the background. If they are missing then the Bluetooth
+            // framework won't give us scan results.
+            val scanFilters = arrayOf(TcnConstants.UUID_SERVICE).map {
+                ScanFilter.Builder().setServiceUuid(ParcelUuid(it)).build()
+            }
 
             val scanSettings = ScanSettings.Builder().apply {
                 // Low latency is important for older Android devices to be able to discover nearby
@@ -164,8 +172,9 @@ class TcnBluetoothManager(
                 setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
                 // Report delay plays an important role in keeping track of the devices nearby:
                 // If a batch scan result doesn't include devices from the previous result,
-                // then we consider those devices are out of range.
-                // Important: Using a large duration value won't get scan results on old OSes
+                // then we consider those devices out of range.
+                // Important: Using a large duration value (greater than 60 sec) won't get us scan
+                // results on old OSes
                 setReportDelay(TimeUnit.SECONDS.toMillis(5))
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     setPhy(ScanSettings.PHY_LE_ALL_SUPPORTED)
@@ -173,8 +182,7 @@ class TcnBluetoothManager(
                 }
             }.build()
 
-//            scanner.startScan(scanFilters, scanSettings, scanCallback)
-            scanner.startScan(null, scanSettings, scanCallback)
+            scanner.startScan(scanFilters, scanSettings, scanCallback)
             Log.i(TAG, "Started scan")
         } catch (exception: Exception) {
             Log.e(TAG, "Start scan failed: $exception")
@@ -211,7 +219,7 @@ class TcnBluetoothManager(
         override fun onScanFailed(errorCode: Int) {
             super.onScanFailed(errorCode)
             Log.e(TAG, "onScanFailed errorCode=$errorCode")
-            if (errorCode == ScanCallback.SCAN_FAILED_APPLICATION_REGISTRATION_FAILED) {
+            if (errorCode == SCAN_FAILED_APPLICATION_REGISTRATION_FAILED) {
                 startScan()
             }
         }
@@ -228,7 +236,7 @@ class TcnBluetoothManager(
                 val scanRecord = it.scanRecord ?: return@for_each
 
                 val tcnServiceData = scanRecord.serviceData[
-                        ParcelUuid(TcnConstants.UUID_SERVICE)]
+                    ParcelUuid(TcnConstants.UUID_SERVICE)]
 
                 val hintIsAndroid = (tcnServiceData != null)
 
